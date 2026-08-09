@@ -2,11 +2,13 @@
 Telegram Bot entry point for the Pixel 10 Pro Google One Gemini Bot.
 
 Commands:
-  /start        – Show welcome message and available commands
-  /login        – Begin credential capture flow (email → password → 2FA)
-  /check_offer  – Run Google One automation and look for Gemini Pro offer
-  /get_link     – Show the last captured offer link
-  /status       – Show current session status and device profile
+  /start             – Show welcome message and available commands
+  /login             – Begin credential capture flow (email → password → 2FA)
+  /check_offer       – Run Google One automation and look for Gemini Pro offer
+  /check_jio_offer   – Run Jio India 5G automation for 18-month free Gemini Pro
+  /get_link          – Show the last captured offer link
+  /status            – Show current session status and device profile
+  /sim_info          – Show Jio SIM network profile details
 """
 
 import asyncio
@@ -26,7 +28,11 @@ from telegram.ext import (
 
 import config
 from device_simulator import create_device_profile
-from google_automation import GoogleAutomationError, check_gemini_offer
+from google_automation import (
+    GoogleAutomationError,
+    check_gemini_offer,
+    check_jio_gemini_offer,
+)
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(level=config.LOG_LEVEL, format=config.LOG_FORMAT)
@@ -77,14 +83,19 @@ def _make_progress_callback(bot, chat_id: int, loop: asyncio.AbstractEventLoop):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send welcome message with command menu."""
     await update.message.reply_text(
-        "🤖 *Pixel 10 Pro Google One Bot*\n\n"
-        "This bot simulates a Google Pixel 10 Pro (Android 16) device, "
-        "logs into your Google account, and retrieves the *12-month free "
-        "Gemini Pro* offer link from Google One.\n\n"
+        "🤖 *Pixel 10 Pro Google One + Jio Bot*\n\n"
+        "This bot simulates a Google Pixel 10 Pro (Android 16) with a "
+        "*Jio India 5G SIM*, logs into your Google account, and retrieves "
+        "Gemini Pro offer links.\n\n"
+        "🎯 *Supported Offers:*\n"
+        "• *12-month* free Gemini Pro (Google One — Pixel device)\n"
+        "• *18-month* free Google AI Pro (Jio 5G — ₹35,100 value)\n\n"
         "📋 *Available Commands:*\n"
         "• /login – Enter your Gmail credentials + 2FA\n"
-        "• /check\\_offer – Detect the Gemini Pro offer (live step logs)\n"
+        "• /check\\_offer – Detect Gemini Pro on Google One\n"
+        "• /check\\_jio\\_offer – Detect Jio 18-month free Gemini offer\n"
         "• /get\\_link – Show the last captured offer link\n"
+        "• /sim\\_info – View Jio SIM network profile\n"
         "• /status – View current session & device info\n\n"
         "⚠️ *Privacy Note:* Credentials are held in memory only for the "
         "duration of the session and never stored persistently.",
@@ -272,6 +283,137 @@ async def get_link(update: Update,
         )
 
 
+# ── /check_jio_offer ──────────────────────────────────────────────────────────
+
+async def check_jio_offer(update: Update,
+                          context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Run Jio India 5G automation to detect the 18-month free Gemini offer."""
+    chat_id = update.effective_chat.id
+    session = _get_session(chat_id)
+
+    if not session.get("email") or not session.get("password"):
+        await update.message.reply_text(
+            "⚠️ No credentials found. Please use /login first."
+        )
+        return
+
+    device = session.get("device")
+    if not device:
+        device = create_device_profile(jio_sim=True)
+        session["device"] = device
+    elif not device.is_jio_sim:
+        # Re-create with Jio SIM if existing device doesn't have one
+        from device_simulator import _generate_jio_sim_profile
+        device.sim_profile = _generate_jio_sim_profile()
+        session["device"] = device
+
+    sim = device.sim_profile
+    await update.message.reply_text(
+        "🚀 *Starting Jio 5G Gemini Offer Check*\n\n"
+        f"📶 SIM: {sim.get('carrier_name')} {sim.get('network_type')} "
+        f"({sim.get('nr_band')})\n"
+        f"📞 Phone: {sim.get('phone_formatted')}\n"
+        f"🎯 Target: 18-month free Google AI Pro (₹35,100)\n\n"
+        "Live updates will follow for each step.",
+        parse_mode="Markdown",
+    )
+
+    loop = asyncio.get_event_loop()
+    progress_cb = _make_progress_callback(context.bot, chat_id, loop)
+
+    try:
+        offer_link = await loop.run_in_executor(
+            None,
+            lambda: check_jio_gemini_offer(
+                session["email"],
+                session["password"],
+                device,
+                totp_secret=session.get("totp_secret"),
+                progress_callback=progress_cb,
+            ),
+        )
+    except GoogleAutomationError as exc:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"❌ *Error:* {exc}",
+            parse_mode="Markdown",
+        )
+        return
+    except Exception as exc:
+        logger.exception("Unexpected error in check_jio_offer for chat %s", chat_id)
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"❌ Unexpected error: {exc}",
+        )
+        return
+
+    if offer_link:
+        session["offer_link"] = offer_link
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=(
+                "🎉 *Jio Gemini Offer Found!*\n\n"
+                "Tap the link below to activate your *18-month free "
+                "Google AI Pro* subscription (₹35,100 value):\n\n"
+                f"🔗 {offer_link}\n\n"
+                "📋 *Benefits include:*\n"
+                "• Gemini 3 access\n"
+                "• 5 TB Google storage\n"
+                "• AI Video Tool (Veo 3)\n"
+                "• NotebookLM (5× limits)\n"
+                "• Gemini in Gmail, Docs & more\n"
+                "• AI Image Editing\n\n"
+                "_Use /get\\_link to retrieve this link again._",
+            ),
+            parse_mode="Markdown",
+        )
+    else:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=(
+                "😔 No active Jio Gemini offer detected.\n\n"
+                "*Possible reasons:*\n"
+                "• Your Google account is not linked to a Jio number\n"
+                "• You need an active Jio 5G plan (₹349+)\n"
+                "• You must be 18+ years old\n"
+                "• The offer may already be claimed on this number\n\n"
+                "💡 Make sure you have:\n"
+                f"1. A Jio SIM with ₹{config.JIO_MIN_PLAN_AMOUNT}+ "
+                f"unlimited 5G plan\n"
+                "2. Registered on MyJio app with your Gmail\n"
+                f"3. Visit: {config.JIO_GEMINI_OFFER_URL}\n\n"
+                "Try again after confirming your Jio 5G eligibility.",
+            ),
+            parse_mode="Markdown",
+        )
+
+
+# ── /sim_info ─────────────────────────────────────────────────────────────────
+
+async def sim_info(update: Update,
+                   context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show the Jio SIM network profile for the current session."""
+    chat_id = update.effective_chat.id
+    session = _get_session(chat_id)
+    device = session.get("device")
+
+    if not device:
+        device = create_device_profile(jio_sim=True)
+        session["device"] = device
+
+    if device.is_jio_sim:
+        await update.message.reply_text(
+            device.sim_summary(),
+            parse_mode="Markdown",
+        )
+    else:
+        await update.message.reply_text(
+            "ℹ️ No Jio SIM profile attached.\n"
+            "Use /check\\_jio\\_offer to create one automatically.",
+            parse_mode="Markdown",
+        )
+
+
 # ── /status ───────────────────────────────────────────────────────────────────
 
 async def status(update: Update,
@@ -340,7 +482,9 @@ def main() -> None:
     app.add_handler(CommandHandler("start", start))
     app.add_handler(login_conv)
     app.add_handler(CommandHandler("check_offer", check_offer))
+    app.add_handler(CommandHandler("check_jio_offer", check_jio_offer))
     app.add_handler(CommandHandler("get_link", get_link))
+    app.add_handler(CommandHandler("sim_info", sim_info))
     app.add_handler(CommandHandler("status", status))
 
     logger.info("Bot is running. Press Ctrl-C to stop.")

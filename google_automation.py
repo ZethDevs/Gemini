@@ -1,8 +1,13 @@
 """
-Google One automation using Selenium.
+Google One + Jio Gemini automation using Selenium.
 
-Logs into a Gmail account, navigates to Google One, detects the
-12-month free Gemini Pro offer, and returns the activation / payment link.
+Logs into a Gmail account, navigates to Google One (and optionally Jio's
+Gemini offer page), detects the Gemini Pro / Google AI Pro offer, and
+returns the activation / payment link.
+
+Supports two offer flows:
+  1. Default Google One  – 12-month free Gemini Pro (Pixel device offer)
+  2. Jio India 5G        – 18-month free Google AI Pro (Jio SIM carrier offer)
 
 progress_callback(msg, screenshot_bytes=None) is called at every key step
 so callers can relay updates to Telegram in real time.
@@ -10,6 +15,8 @@ so callers can relay updates to Telegram in real time.
 
 import io
 import logging
+import math
+import random
 import re
 import shutil
 import time
@@ -26,6 +33,7 @@ from selenium.common.exceptions import (
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
+from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
@@ -35,6 +43,52 @@ from device_simulator import DeviceProfile
 logger = logging.getLogger(__name__)
 
 ProgressCB = Optional[Callable[[str, Optional[bytes]], None]]
+
+
+# ── Human-like behaviour helpers ─────────────────────────────────────────────
+
+def _human_delay(key: str) -> float:
+    """Return a Gaussian-random delay in seconds for the given action type."""
+    mean, std = config.HUMAN_DELAY.get(key, (1.0, 0.3))
+    return max(0.1, random.gauss(mean, std))
+
+
+def _human_type(element, text: str) -> None:
+    """
+    Type text into an element one character at a time with randomised delays
+    to simulate real human typing speed and rhythm.
+    """
+    for char in text:
+        element.send_keys(char)
+        # Per-character delay with occasional longer pauses (typos / thinking)
+        delay = max(0.02, random.gauss(*config.HUMAN_DELAY["type_char"]))
+        if random.random() < 0.03:
+            delay += random.uniform(0.3, 0.8)  # Occasional thinking pause
+        time.sleep(delay)
+
+
+def _human_scroll(driver: webdriver.Chrome, direction: str = "down",
+                 distance: int = 0) -> None:
+    """Scroll the page with a human-like amount and pause."""
+    if distance <= 0:
+        distance = random.randint(200, 600)
+    sign = 1 if direction == "down" else -1
+    driver.execute_script(f"window.scrollBy(0, {sign * distance});")
+    time.sleep(_human_delay("scroll_pause"))
+
+
+def _human_click(driver: webdriver.Chrome, element) -> None:
+    """Click with a slight random offset and delay to mimic finger tap."""
+    try:
+        actions = ActionChains(driver)
+        x_off = random.randint(-3, 3)
+        y_off = random.randint(-3, 3)
+        actions.move_to_element_with_offset(element, x_off, y_off)
+        actions.pause(_human_delay("click_pause"))
+        actions.click()
+        actions.perform()
+    except Exception:
+        element.click()
 
 
 # ── Screenshot helper ─────────────────────────────────────────────────────────
@@ -95,7 +149,7 @@ def _build_driver(profile: DeviceProfile) -> webdriver.Chrome:
     options.add_argument("--enable-features=NetworkService,NetworkServiceInProcess")
     options.add_argument("--lang=en-US")
 
-    # ── Window size = Pixel 10 Pro CSS viewport ───────────────────────────────
+    # ── Window size = randomised Pixel 10 Pro CSS viewport ────────────────────
     w, h = profile.screen_width, profile.screen_height
     options.add_argument(f"--window-size={w},{h}")
     options.add_argument(f"--user-agent={profile.user_agent}")
@@ -140,12 +194,28 @@ def _build_driver(profile: DeviceProfile) -> webdriver.Chrome:
 
     # ── CDP layer 2: User-Agent + full Sec-CH-UA-* client hints ──────────────
     # This is what Google reads to know the real device behind the reduced UA.
+    # If Jio SIM is active, use Indian locale (en-IN) for regional offer detection.
+    sim = profile.sim_profile or {}
+    accept_lang = f"{sim.get('locale', 'en-US')},en;q=0.9"
+    ua_metadata = profile.client_hints_metadata()
+    if profile.is_jio_sim:
+        ua_metadata["platform"] = "Android"
+        # Inject Jio locale into full version list for proper locale negotiation
     driver.execute_cdp_cmd("Emulation.setUserAgentOverride", {
         "userAgent":         profile.user_agent,
-        "acceptLanguage":    "en-US,en;q=0.9",
+        "acceptLanguage":    accept_lang,
         "platform":          "Linux armv8l",
-        "userAgentMetadata": profile.client_hints_metadata(),
+        "userAgentMetadata": ua_metadata,
     })
+
+    # ── CDP layer 2b: Set timezone to Jio India (IST) ────────────────────────
+    if profile.is_jio_sim:
+        driver.execute_cdp_cmd("Emulation.setTimezoneOverride", {
+            "timezoneId": sim.get("timezone", "Asia/Kolkata"),
+        })
+        driver.execute_cdp_cmd("Emulation.setLocaleOverride", {
+            "locale": sim.get("locale", "en-IN"),
+        })
 
     # ── CDP layer 3: multitouch emulation ────────────────────────────────────
     driver.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {
@@ -243,9 +313,10 @@ def _enter_totp(driver: webdriver.Chrome, totp_secret: str,
         _report(cb, "⚠️ TOTP input field not found on this page", driver)
         return False
 
+    time.sleep(_human_delay("field_focus"))
     totp_field.clear()
-    totp_field.send_keys(code)
-    time.sleep(0.5)
+    _human_type(totp_field, code)
+    time.sleep(_human_delay("click_pause"))
 
     # Submit
     for sid in ["totpNext", "passwordNext"]:
@@ -507,25 +578,29 @@ def _gmail_login(driver: webdriver.Chrome, email: str, password: str,
         # ── Step 1: Load login page ───────────────────────────────────────────
         _report(cb, "🌐 Step 1/6 — Loading Google sign-in page…", driver)
         driver.get(config.GMAIL_LOGIN_URL)
-        time.sleep(2)
+        time.sleep(_human_delay("page_load"))
 
         # ── Step 2: Enter email ───────────────────────────────────────────────
         _report(cb, f"📧 Step 2/6 — Entering email: {email}", driver)
         email_field = _wait_for(driver, By.CSS_SELECTOR,
                                 'input[name="identifier"], input[type="email"]')
+        time.sleep(_human_delay("field_focus"))
         email_field.clear()
-        email_field.send_keys(email)
+        _human_type(email_field, email)
+        time.sleep(_human_delay("click_pause"))
         _wait_for(driver, By.ID, "identifierNext").click()
-        time.sleep(2)
+        time.sleep(_human_delay("page_load"))
 
         # ── Step 3: Enter password ────────────────────────────────────────────
         _report(cb, "🔒 Step 3/6 — Entering password…", driver)
         password_field = _wait_for(driver, By.CSS_SELECTOR,
                                    'input[type="password"]')
+        time.sleep(_human_delay("field_focus"))
         password_field.clear()
-        password_field.send_keys(password)
+        _human_type(password_field, password)
+        time.sleep(_human_delay("click_pause"))
         _wait_for(driver, By.ID, "passwordNext").click()
-        time.sleep(3)
+        time.sleep(_human_delay("page_load") + 0.5)
 
         # ── Step 4: 2FA / TOTP ────────────────────────────────────────────────
         if totp_secret:
@@ -631,32 +706,203 @@ def _navigate_google_one(driver: webdriver.Chrome,
         try:
             _report(cb, f"🔍 Step 6/6 — Scanning: {url}", driver)
             driver.get(url)
-            time.sleep(3)
+            time.sleep(_human_delay("page_load"))
 
+            # Dismiss cookie/consent banners
             for selector in (
                 '[aria-label="Accept all"]',
                 'button[jsname="higCR"]',
                 '[data-action="accept"]',
             ):
                 try:
-                    driver.find_element(By.CSS_SELECTOR, selector).click()
-                    time.sleep(1)
-                    break
+                    el = driver.find_element(By.CSS_SELECTOR, selector)
+                    if el.is_displayed():
+                        time.sleep(_human_delay("consent_click"))
+                        el.click()
+                        time.sleep(_human_delay("click_pause"))
+                        break
                 except NoSuchElementException:
                     pass
 
-            _report(cb, f"🔎 Searching page for Gemini offer links…", driver)
+            # Human-like scrolling to explore the page
+            for _ in range(random.randint(2, 4)):
+                _human_scroll(driver, "down")
+
+            _report(cb, "🔎 Searching page for Gemini offer links…", driver)
             link = _extract_payment_link(driver)
             if link:
-                _report(cb,
-                        f"🎯 Offer link found!\n🔗 {link}",
-                        driver)
+                _report(cb, f"🎯 Offer link found!\n🔗 {link}", driver)
                 return link
             else:
                 _report(cb, f"😔 No offer link on {url}, trying next…", driver)
 
         except (TimeoutException, WebDriverException) as exc:
             _report(cb, f"⚠️ Error loading {url}: {exc}", driver)
+
+    return None
+
+
+# ── Jio Gemini offer detection ────────────────────────────────────────────────
+
+def _extract_jio_offer_link(driver: webdriver.Chrome) -> Optional[str]:
+    """
+    Scan the current page for a Jio Google Gemini offer / activation link.
+    Uses Jio-specific keywords from config.JIO_GEMINI_OFFER_KEYWORDS.
+    """
+    keywords = config.JIO_GEMINI_OFFER_KEYWORDS
+    url_pat = re.compile(
+        r"(gemini|upgrade|activate|offer|redeem|trial|checkout|jio|one\.google)",
+        re.IGNORECASE,
+    )
+
+    all_links = driver.find_elements(By.TAG_NAME, "a")
+
+    # Pass 1: Match Jio-specific keywords in link text + href
+    for link in all_links:
+        try:
+            text = (link.text + " " + (link.get_attribute("aria-label") or "")).lower()
+            href = link.get_attribute("href") or ""
+            has_jio_kw = any(kw in text for kw in keywords)
+            if has_jio_kw and href:
+                return href
+        except Exception:
+            continue
+
+    # Pass 2: Match URL pattern for Gemini/Jio offer pages
+    for link in all_links:
+        try:
+            href = link.get_attribute("href") or ""
+            if url_pat.search(href):
+                text = (link.text or "").lower()
+                if any(kw in text for kw in ["claim", "activate", "offer", "free", "gemini"]):
+                    return href
+        except Exception:
+            continue
+
+    # Pass 3: Check buttons with Jio/Gemini keywords wrapped in anchor tags
+    for btn in driver.find_elements(By.CSS_SELECTOR, "button, [role='button']"):
+        try:
+            btn_text = btn.text.lower()
+            if any(kw in btn_text for kw in keywords):
+                try:
+                    parent = btn.find_element(By.XPATH, "ancestor::a")
+                    href = parent.get_attribute("href") or ""
+                    if href:
+                        return href
+                except NoSuchElementException:
+                    pass
+                return driver.current_url
+        except Exception:
+            continue
+
+    return None
+
+
+def _scan_page_for_jio_keywords(driver: webdriver.Chrome,
+                                cb: ProgressCB = None) -> list[str]:
+    """
+    Scan the visible page content for Jio Gemini offer keywords.
+    Returns a list of matched keywords for reporting.
+    """
+    try:
+        page_text = driver.find_element(By.TAG_NAME, "body").text.lower()
+    except Exception:
+        page_text = ""
+
+    matched = []
+    for kw in config.JIO_GEMINI_OFFER_KEYWORDS:
+        if kw in page_text:
+            matched.append(kw)
+
+    if cb:
+        if matched:
+            _report(cb,
+                    f"🔑 Jio keywords matched ({len(matched)}):\n"
+                    + ", ".join(matched[:15])
+                    + ("…" if len(matched) > 15 else ""),
+                    driver)
+        else:
+            _report(cb, "ℹ️ No Jio Gemini keywords found on this page", driver)
+
+    return matched
+
+
+def _navigate_jio_gemini_offer(driver: webdriver.Chrome,
+                               cb: ProgressCB = None) -> Optional[str]:
+    """
+    Navigate to Jio's Google Gemini offer page and Google One to detect
+    the 18-month free Google AI Pro offer for Jio 5G users.
+
+    Checks these URLs in order:
+      1. Jio Gemini Offer page (jio.com/google-gemini-offer/)
+      2. MyJio Dashboard (claim offer portal)
+      3. Google One (main page)
+      4. Google One plans/offers page
+    """
+    urls_to_check = [
+        (config.JIO_GEMINI_OFFER_URL, "Jio Gemini Offer page"),
+        (config.JIO_MYJIO_DASHBOARD_URL, "MyJio Dashboard"),
+        (config.GOOGLE_ONE_URL, "Google One"),
+        (config.GOOGLE_ONE_OFFERS_URL, "Google One Plans"),
+    ]
+
+    for url, label in urls_to_check:
+        try:
+            _report(cb, f"🔍 Scanning {label}: {url}", driver)
+            driver.get(url)
+            time.sleep(_human_delay("page_load"))
+
+            # Dismiss cookie/consent banners
+            for selector in (
+                '[aria-label="Accept all"]',
+                'button[jsname="higCR"]',
+                '[data-action="accept"]',
+                'button[id="accept"]',
+                '.consent-accept',
+            ):
+                try:
+                    el = driver.find_element(By.CSS_SELECTOR, selector)
+                    if el.is_displayed():
+                        time.sleep(_human_delay("consent_click"))
+                        el.click()
+                        time.sleep(_human_delay("click_pause"))
+                        break
+                except NoSuchElementException:
+                    pass
+
+            # Human-like scrolling — explore the page content
+            scroll_count = random.randint(2, 5)
+            for _ in range(scroll_count):
+                _human_scroll(driver, "down")
+            # Sometimes scroll back up (natural reading pattern)
+            if random.random() < 0.3:
+                _human_scroll(driver, "up", random.randint(100, 300))
+
+            # Brief "reading" pause
+            time.sleep(_human_delay("think_pause"))
+
+            # Scan for Jio keywords on the page
+            matched_kws = _scan_page_for_jio_keywords(driver, cb)
+
+            # Try to extract an offer link
+            link = _extract_jio_offer_link(driver)
+            if link:
+                _report(cb,
+                        f"🎯 Jio Gemini offer link found on {label}!\n🔗 {link}",
+                        driver)
+                return link
+
+            # If we found keywords but no link, report it
+            if matched_kws:
+                _report(cb,
+                        f"📋 {label}: Found {len(matched_kws)} Jio keywords "
+                        f"but no clickable offer link. Trying next page…",
+                        driver)
+            else:
+                _report(cb, f"😔 No Jio offer detected on {label}", driver)
+
+        except (TimeoutException, WebDriverException) as exc:
+            _report(cb, f"⚠️ Error loading {label}: {exc}", driver)
 
     return None
 
@@ -672,7 +918,7 @@ def check_gemini_offer(email: str, password: str,
                        totp_secret: Optional[str] = None,
                        progress_callback: ProgressCB = None) -> Optional[str]:
     """
-    Main entry point.
+    Main entry point — Google One offer flow.
 
     Logs into email/password with optional TOTP, navigates to Google One,
     and returns the Gemini Pro offer link (or None).
@@ -682,9 +928,12 @@ def check_gemini_offer(email: str, password: str,
     """
     driver: Optional[webdriver.Chrome] = None
     try:
+        fp_hash = device.fingerprint_hash()
         _report(progress_callback,
                 f"🤖 Starting Pixel 10 Pro simulator\n"
-                f"📱 Session: {device.session_id[:8]}…\n"
+                f"📱 Session: {device.session_id[:8]}…  |  FP: `{fp_hash}`\n"
+                f"🔧 Build: `{device.build_id}`  |  Chrome: {device.chrome_version}\n"
+                f"⚙️ RAM: {device.device_memory}GB  |  CPU: {device.hardware_concurrency} cores\n"
                 f"🌐 User-Agent: {device.user_agent[:60]}…")
 
         driver = _build_driver(device)
@@ -701,6 +950,72 @@ def check_gemini_offer(email: str, password: str,
             )
 
         offer_link = _navigate_google_one(driver, cb=progress_callback)
+        return offer_link
+
+    finally:
+        if driver:
+            try:
+                _report(progress_callback, "🧹 Closing browser session…")
+                driver.quit()
+            except Exception:
+                pass
+
+
+def check_jio_gemini_offer(email: str, password: str,
+                           device: DeviceProfile,
+                           totp_secret: Optional[str] = None,
+                           progress_callback: ProgressCB = None) -> Optional[str]:
+    """
+    Jio India 5G offer flow — 18-month free Google AI Pro.
+
+    Logs into email/password with optional TOTP, then navigates through
+    Jio's Google Gemini offer page and Google One to detect the
+    18-month free Google AI Pro offer available to Jio 5G subscribers.
+
+    The device profile must include a Jio SIM profile (created by default
+    in create_device_profile(jio_sim=True)).
+
+    progress_callback(msg: str, screenshot_bytes: Optional[bytes]) is called
+    at every key step so the caller can relay live updates to Telegram.
+    """
+    driver: Optional[webdriver.Chrome] = None
+    try:
+        sim = device.sim_profile or {}
+        fp_hash = device.fingerprint_hash()
+        _report(progress_callback,
+                f"🤖 Starting Pixel 10 Pro + Jio 5G SIM simulator\n"
+                f"📱 Session: {device.session_id[:8]}…  |  FP: `{fp_hash}`\n"
+                f"🔧 Build: `{device.build_id}`  |  Chrome: {device.chrome_version}\n"
+                f"⚙️ RAM: {device.device_memory}GB  |  CPU: {device.hardware_concurrency} cores  |  "
+                f"Storage: {device.storage_gb}GB\n"
+                f"📺 Screen: {device.screen_width}×{device.screen_height} @{device.pixel_ratio}×\n"
+                f"📶 SIM: {sim.get('carrier_name', 'N/A')} {sim.get('network_type', '')} "
+                f"({sim.get('nr_band', '')}) — {sim.get('circle', 'N/A')}\n"
+                f"📞 Phone: {sim.get('phone_formatted', 'N/A')}\n"
+                f"🌐 User-Agent: {device.user_agent[:60]}…\n"
+                f"🎯 Target: Jio 18-month free Google AI Pro (₹35,100)")
+
+        if not device.is_jio_sim:
+            _report(progress_callback,
+                    "⚠️ No Jio SIM profile detected. "
+                    "Creating device with create_device_profile(jio_sim=True) "
+                    "is recommended for Jio offer detection.")
+
+        driver = _build_driver(device)
+        _report(progress_callback, "✅ Browser launched with Jio 5G network profile", driver)
+
+        logged_in = _gmail_login(
+            driver, email, password,
+            totp_secret=totp_secret,
+            cb=progress_callback,
+        )
+        if not logged_in:
+            raise GoogleAutomationError(
+                "Login failed — please check your credentials."
+            )
+
+        # Navigate Jio offer pages + Google One
+        offer_link = _navigate_jio_gemini_offer(driver, cb=progress_callback)
         return offer_link
 
     finally:
