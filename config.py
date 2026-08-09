@@ -9,7 +9,7 @@ while remaining within the genuine specification envelope.
 import os
 
 # ── Telegram ──────────────────────────────────────────────────────────────────
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8629696108:AAH_OtEl9iu-u62MbYts1kCEORRfrCgErC0")
 
 # ── Device specs – Google Pixel 10 Pro (Android 16) ──────────────────────────
 DEVICE_MODEL        = "Pixel 10 Pro"
