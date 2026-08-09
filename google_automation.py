@@ -15,6 +15,8 @@ so callers can relay updates to Telegram in real time.
 
 import io
 import logging
+import math
+import random
 import re
 import shutil
 import time
@@ -31,6 +33,7 @@ from selenium.common.exceptions import (
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
+from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
@@ -40,6 +43,52 @@ from device_simulator import DeviceProfile
 logger = logging.getLogger(__name__)
 
 ProgressCB = Optional[Callable[[str, Optional[bytes]], None]]
+
+
+# ── Human-like behaviour helpers ─────────────────────────────────────────────
+
+def _human_delay(key: str) -> float:
+    """Return a Gaussian-random delay in seconds for the given action type."""
+    mean, std = config.HUMAN_DELAY.get(key, (1.0, 0.3))
+    return max(0.1, random.gauss(mean, std))
+
+
+def _human_type(element, text: str) -> None:
+    """
+    Type text into an element one character at a time with randomised delays
+    to simulate real human typing speed and rhythm.
+    """
+    for char in text:
+        element.send_keys(char)
+        # Per-character delay with occasional longer pauses (typos / thinking)
+        delay = max(0.02, random.gauss(*config.HUMAN_DELAY["type_char"]))
+        if random.random() < 0.03:
+            delay += random.uniform(0.3, 0.8)  # Occasional thinking pause
+        time.sleep(delay)
+
+
+def _human_scroll(driver: webdriver.Chrome, direction: str = "down",
+                 distance: int = 0) -> None:
+    """Scroll the page with a human-like amount and pause."""
+    if distance <= 0:
+        distance = random.randint(200, 600)
+    sign = 1 if direction == "down" else -1
+    driver.execute_script(f"window.scrollBy(0, {sign * distance});")
+    time.sleep(_human_delay("scroll_pause"))
+
+
+def _human_click(driver: webdriver.Chrome, element) -> None:
+    """Click with a slight random offset and delay to mimic finger tap."""
+    try:
+        actions = ActionChains(driver)
+        x_off = random.randint(-3, 3)
+        y_off = random.randint(-3, 3)
+        actions.move_to_element_with_offset(element, x_off, y_off)
+        actions.pause(_human_delay("click_pause"))
+        actions.click()
+        actions.perform()
+    except Exception:
+        element.click()
 
 
 # ── Screenshot helper ─────────────────────────────────────────────────────────
@@ -100,7 +149,7 @@ def _build_driver(profile: DeviceProfile) -> webdriver.Chrome:
     options.add_argument("--enable-features=NetworkService,NetworkServiceInProcess")
     options.add_argument("--lang=en-US")
 
-    # ── Window size = Pixel 10 Pro CSS viewport ───────────────────────────────
+    # ── Window size = randomised Pixel 10 Pro CSS viewport ────────────────────
     w, h = profile.screen_width, profile.screen_height
     options.add_argument(f"--window-size={w},{h}")
     options.add_argument(f"--user-agent={profile.user_agent}")
@@ -264,9 +313,10 @@ def _enter_totp(driver: webdriver.Chrome, totp_secret: str,
         _report(cb, "⚠️ TOTP input field not found on this page", driver)
         return False
 
+    time.sleep(_human_delay("field_focus"))
     totp_field.clear()
-    totp_field.send_keys(code)
-    time.sleep(0.5)
+    _human_type(totp_field, code)
+    time.sleep(_human_delay("click_pause"))
 
     # Submit
     for sid in ["totpNext", "passwordNext"]:
@@ -528,25 +578,29 @@ def _gmail_login(driver: webdriver.Chrome, email: str, password: str,
         # ── Step 1: Load login page ───────────────────────────────────────────
         _report(cb, "🌐 Step 1/6 — Loading Google sign-in page…", driver)
         driver.get(config.GMAIL_LOGIN_URL)
-        time.sleep(2)
+        time.sleep(_human_delay("page_load"))
 
         # ── Step 2: Enter email ───────────────────────────────────────────────
         _report(cb, f"📧 Step 2/6 — Entering email: {email}", driver)
         email_field = _wait_for(driver, By.CSS_SELECTOR,
                                 'input[name="identifier"], input[type="email"]')
+        time.sleep(_human_delay("field_focus"))
         email_field.clear()
-        email_field.send_keys(email)
+        _human_type(email_field, email)
+        time.sleep(_human_delay("click_pause"))
         _wait_for(driver, By.ID, "identifierNext").click()
-        time.sleep(2)
+        time.sleep(_human_delay("page_load"))
 
         # ── Step 3: Enter password ────────────────────────────────────────────
         _report(cb, "🔒 Step 3/6 — Entering password…", driver)
         password_field = _wait_for(driver, By.CSS_SELECTOR,
                                    'input[type="password"]')
+        time.sleep(_human_delay("field_focus"))
         password_field.clear()
-        password_field.send_keys(password)
+        _human_type(password_field, password)
+        time.sleep(_human_delay("click_pause"))
         _wait_for(driver, By.ID, "passwordNext").click()
-        time.sleep(3)
+        time.sleep(_human_delay("page_load") + 0.5)
 
         # ── Step 4: 2FA / TOTP ────────────────────────────────────────────────
         if totp_secret:
@@ -652,26 +706,32 @@ def _navigate_google_one(driver: webdriver.Chrome,
         try:
             _report(cb, f"🔍 Step 6/6 — Scanning: {url}", driver)
             driver.get(url)
-            time.sleep(3)
+            time.sleep(_human_delay("page_load"))
 
+            # Dismiss cookie/consent banners
             for selector in (
                 '[aria-label="Accept all"]',
                 'button[jsname="higCR"]',
                 '[data-action="accept"]',
             ):
                 try:
-                    driver.find_element(By.CSS_SELECTOR, selector).click()
-                    time.sleep(1)
-                    break
+                    el = driver.find_element(By.CSS_SELECTOR, selector)
+                    if el.is_displayed():
+                        time.sleep(_human_delay("consent_click"))
+                        el.click()
+                        time.sleep(_human_delay("click_pause"))
+                        break
                 except NoSuchElementException:
                     pass
 
-            _report(cb, f"🔎 Searching page for Gemini offer links…", driver)
+            # Human-like scrolling to explore the page
+            for _ in range(random.randint(2, 4)):
+                _human_scroll(driver, "down")
+
+            _report(cb, "🔎 Searching page for Gemini offer links…", driver)
             link = _extract_payment_link(driver)
             if link:
-                _report(cb,
-                        f"🎯 Offer link found!\n🔗 {link}",
-                        driver)
+                _report(cb, f"🎯 Offer link found!\n🔗 {link}", driver)
                 return link
             else:
                 _report(cb, f"😔 No offer link on {url}, trying next…", driver)
@@ -790,7 +850,7 @@ def _navigate_jio_gemini_offer(driver: webdriver.Chrome,
         try:
             _report(cb, f"🔍 Scanning {label}: {url}", driver)
             driver.get(url)
-            time.sleep(3)
+            time.sleep(_human_delay("page_load"))
 
             # Dismiss cookie/consent banners
             for selector in (
@@ -803,11 +863,23 @@ def _navigate_jio_gemini_offer(driver: webdriver.Chrome,
                 try:
                     el = driver.find_element(By.CSS_SELECTOR, selector)
                     if el.is_displayed():
+                        time.sleep(_human_delay("consent_click"))
                         el.click()
-                        time.sleep(1)
+                        time.sleep(_human_delay("click_pause"))
                         break
                 except NoSuchElementException:
                     pass
+
+            # Human-like scrolling — explore the page content
+            scroll_count = random.randint(2, 5)
+            for _ in range(scroll_count):
+                _human_scroll(driver, "down")
+            # Sometimes scroll back up (natural reading pattern)
+            if random.random() < 0.3:
+                _human_scroll(driver, "up", random.randint(100, 300))
+
+            # Brief "reading" pause
+            time.sleep(_human_delay("think_pause"))
 
             # Scan for Jio keywords on the page
             matched_kws = _scan_page_for_jio_keywords(driver, cb)
@@ -856,9 +928,12 @@ def check_gemini_offer(email: str, password: str,
     """
     driver: Optional[webdriver.Chrome] = None
     try:
+        fp_hash = device.fingerprint_hash()
         _report(progress_callback,
                 f"🤖 Starting Pixel 10 Pro simulator\n"
-                f"📱 Session: {device.session_id[:8]}…\n"
+                f"📱 Session: {device.session_id[:8]}…  |  FP: `{fp_hash}`\n"
+                f"🔧 Build: `{device.build_id}`  |  Chrome: {device.chrome_version}\n"
+                f"⚙️ RAM: {device.device_memory}GB  |  CPU: {device.hardware_concurrency} cores\n"
                 f"🌐 User-Agent: {device.user_agent[:60]}…")
 
         driver = _build_driver(device)
@@ -906,11 +981,16 @@ def check_jio_gemini_offer(email: str, password: str,
     driver: Optional[webdriver.Chrome] = None
     try:
         sim = device.sim_profile or {}
+        fp_hash = device.fingerprint_hash()
         _report(progress_callback,
                 f"🤖 Starting Pixel 10 Pro + Jio 5G SIM simulator\n"
-                f"📱 Session: {device.session_id[:8]}…\n"
+                f"📱 Session: {device.session_id[:8]}…  |  FP: `{fp_hash}`\n"
+                f"🔧 Build: `{device.build_id}`  |  Chrome: {device.chrome_version}\n"
+                f"⚙️ RAM: {device.device_memory}GB  |  CPU: {device.hardware_concurrency} cores  |  "
+                f"Storage: {device.storage_gb}GB\n"
+                f"📺 Screen: {device.screen_width}×{device.screen_height} @{device.pixel_ratio}×\n"
                 f"📶 SIM: {sim.get('carrier_name', 'N/A')} {sim.get('network_type', '')} "
-                f"({sim.get('nr_band', '')})\n"
+                f"({sim.get('nr_band', '')}) — {sim.get('circle', 'N/A')}\n"
                 f"📞 Phone: {sim.get('phone_formatted', 'N/A')}\n"
                 f"🌐 User-Agent: {device.user_agent[:60]}…\n"
                 f"🎯 Target: Jio 18-month free Google AI Pro (₹35,100)")
