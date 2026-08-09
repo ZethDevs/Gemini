@@ -61,6 +61,86 @@ GEMINI_OFFER_KEYWORDS = [
     "redeem",
 ]
 
+# ── Jio India SIM Network Configuration ──────────────────────────────────────
+# Reliance Jio Infocomm Limited – India's largest 5G operator
+# MCC 405 = India (mobile), MNC 874 = Jio (primary 5G network)
+JIO_MCC              = "405"   # Mobile Country Code – India
+JIO_MNC              = "874"   # Mobile Network Code – Reliance Jio 5G
+JIO_CARRIER_NAME     = "Jio"
+JIO_CARRIER_FULL     = "Reliance Jio Infocomm Limited"
+JIO_NETWORK_TYPE     = "5G"    # Jio True 5G (SA – Standalone)
+JIO_NETWORK_CLASS    = "nr"    # New Radio (5G NR)
+JIO_ISO_COUNTRY      = "in"    # ISO 3166-1 alpha-2 for India
+JIO_LOCALE           = "en-IN" # English (India)
+JIO_TIMEZONE         = "Asia/Kolkata"  # IST (UTC+5:30)
+
+# Jio SIM identifiers
+JIO_ICCID_PREFIX     = "8991874"  # Jio ICCID prefix (89=telecom, 91=India, 874=Jio)
+JIO_SIM_OPERATOR     = "405874"   # MCC+MNC combined
+
+# Jio 5G network simulation parameters
+JIO_5G_DOWNLINK_MBPS = 150.0    # Typical Jio 5G download speed
+JIO_5G_UPLINK_MBPS   = 30.0     # Typical Jio 5G upload speed
+JIO_5G_RTT_MS        = 15       # Low latency on Jio True 5G SA
+JIO_5G_SIGNAL_DBM    = -65      # Strong 5G signal (dBm)
+JIO_5G_NR_BAND       = "n78"    # Jio's primary 5G band (3.5 GHz)
+
+# Jio Google Gemini Offer – https://www.jio.com/google-gemini-offer/
+# Free 18-month Google AI Pro subscription (₹35,100 value) for Jio 5G users
+JIO_GEMINI_OFFER_URL     = "https://www.jio.com/google-gemini-offer/"
+JIO_MYJIO_DASHBOARD_URL  = "https://www.jio.com/dl/dashboard"
+JIO_RECHARGE_URL         = "https://www.jio.com/selfcare/recharge/mobility/"
+JIO_MIN_PLAN_AMOUNT      = 349   # Minimum ₹349 unlimited 5G plan required
+
+# Jio Gemini offer detection keywords – matches content on Google One / Gemini
+# pages that indicate the Jio-exclusive 18-month free Pro plan
+JIO_GEMINI_OFFER_KEYWORDS = [
+    # Duration & pricing keywords
+    "18 month",
+    "18-month",
+    "18 months free",
+    "18 months",
+    "free for 18",
+    "35,100",
+    "35100",
+    # Jio-specific keywords
+    "jio",
+    "jio offer",
+    "jio 5g",
+    "jio unlimited",
+    "jio users",
+    "jio sim",
+    "myjio",
+    "reliance jio",
+    # Gemini Pro plan keywords (Jio variant)
+    "gemini pro",
+    "gemini 3",
+    "ai pro",
+    "google ai pro",
+    "google gemini offer",
+    "gemini pro plan",
+    "gemini subscription",
+    # Offer action keywords
+    "claim offer",
+    "claim your",
+    "activate offer",
+    "free subscription",
+    "free pro plan",
+    "exclusive offer",
+    "limited-time offer",
+    # Benefit keywords unique to the Jio Gemini deal
+    "5 tb storage",
+    "5tb storage",
+    "5 tb",
+    "veo",
+    "notebooklm",
+    "deep research",
+    "ai video",
+    "ai image",
+    "workspace",
+    "gemini in gmail",
+]
+
 # ── Selenium / WebDriver ──────────────────────────────────────────────────────
 WEBDRIVER_TIMEOUT  = 30   # seconds – explicit wait
 IMPLICIT_WAIT      = 10   # seconds
